@@ -6,11 +6,11 @@ from pathlib import Path
 
 import spacy
 import pandas as pd
+import numpy as np
 
 from collections import Counter
 
 from sklearn.metrics import precision_score, recall_score
-from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction import DictVectorizer
 from sklearn import svm
 
@@ -97,15 +97,17 @@ class InitialClassifier():
         else:
             self.clf = clf_instance
 
-        self.concept_vectorizer = None
+        self.desired_features = ['form', 'pos']
         self.feature_vectorizer = None
+        self.label_set = set()
 
     def preprocess(self, collection, train=False):
+
         process_ES = spacy.load('es_core_news_sm')
         accepted_pos = ('NOUN', 'PROPN')
         accepted_pos = ()
 
-        df = pd.DataFrame(columns=['concept', 'pos', 'pre_pos', 'post_pos', 'label'])
+        df = pd.DataFrame(columns=self.desired_features)
 
         pos_list = []
         for sentence in collection.sentences:
@@ -115,46 +117,61 @@ class InitialClassifier():
 
                 if not accepted_pos or token.pos_ in accepted_pos:
 
+                    features = {
+                        'form': token.text,
+                        'lemma': token.lemma_,
+                        'pos': token.pos_
+                    }
+
+                    pre_token_idx = token.i-1
+                    if pre_token_idx >= 0:
+                        features['pre_form'] = doc[pre_token_idx].text
+                        features['pre_lemma'] = doc[pre_token_idx].lemma_
+                        features['pre_pos'] = doc[pre_token_idx].pos_
+                    else:
+                        features['pre_form'] = '_START_'
+                        features['pre_lemma'] = '_START_'
+                        features['pre_pos'] = '_START_'
+
+                    post_token_idx = token.i+1
+                    if post_token_idx < len(doc):
+                        features['post_form'] = doc[post_token_idx].text
+                        features['post_lemma'] = doc[post_token_idx].lemma_
+                        features['post_pos'] = doc[post_token_idx].pos_
+                    else:
+                        features['post_form'] = '_END_'
+                        features['post_lemma'] = '_END_'
+                        features['post_pos'] = '_END_'
+
+                    # Filter features
+                    filtered_features = {k: features[k] for k in features if k in self.desired_features}
+
+                    # Now, add the label
+
                     start = token.idx
                     end = start + len(token)
                     keyphrase = sentence.find_keyphrase(start=start, end=end)
 
                     if keyphrase:
-                        # label = keyphrase.label
-                        label = 1
+                        filtered_features['label'] = 1
+                        filtered_features['label'] = keyphrase.label
                         pos_list.append(token.pos_)
+
                     else:
-                        label = 0
+                        filtered_features['label'] = "None"
 
-                    pre_pos = 'START'
-                    if token.i-1 >= 0:
-                        pre_pos = str(doc[token.i-1])
+                    df = df.append(filtered_features, ignore_index=True)
 
-                    post_pos = 'END'
-                    if token.i+1 < len(doc):
-                        post_pos = str(doc[token.i-1])
+        # print('Counter pos: %s' % Counter(pos_list))
 
-                    features = {
-                        'concept': token.text,
-                        'pos': token.pos_,
-                        'pre_pos': pre_pos,
-                        'post_pos': post_pos,
-                        'label': label}
-                    df = df.append(features, ignore_index=True)
-
-        print('Counter pos: %s' % Counter(pos_list))
-
-        no_label_dict = df.T.drop(['label']).T.to_dict('records')
+        no_label_dict = df.drop(['label'], axis=1).to_dict('records')
         if train:
-            self.concept_vectorizer = CountVectorizer()
-            self.concept_vectorizer.fit(df.concept)
-
             self.feature_vectorizer = DictVectorizer()
             self.feature_vectorizer.fit(no_label_dict)
 
         vectorized_data = self.feature_vectorizer.transform(no_label_dict)
 
-        return vectorized_data, df.label.values.astype('int')
+        return vectorized_data, df.label.values.astype('str')
 
     def train(self, finput):
 
@@ -171,16 +188,18 @@ class InitialClassifier():
         """
 
         x_train, y_train = self.preprocess(collection, True)
-        print('Counter train: %s' % Counter(y_train))
+        # print('Counter train: %s' % Counter(y_train))
 
         fit_result = self.clf.fit(x_train, y_train)
-        print("Success at training!")
+        print("Success at training!\n")
+
+        self.label_set = list(set(y_train))
 
         return fit_result
 
     def predict_entities(self, collection):
 
-        if self.concept_vectorizer is None:
+        if self.feature_vectorizer is None:
             raise Exception("Not trained yet!")
 
         X_test, y_test = self.preprocess(collection)
@@ -190,8 +209,12 @@ class InitialClassifier():
 
         print('Counter test: %s' % Counter(y_test))
         print('Counter pred: %s' % Counter(y_pred))
-        print('Average precision: {0:0.2f}'.format(precision_score(y_test, y_pred)))
-        print('Average recall: {0:0.2f}'.format(recall_score(y_test, y_pred)))
+
+        precision = precision_score(y_test, y_pred, average=None, labels=self.label_set)
+        recall = recall_score(y_test, y_pred, average=None, labels=self.label_set)
+
+        for tpl in zip(self.label_set, precision, recall):
+            print("Label: {0:10}{1:0.2f}\t{2:0.2f}".format(*tpl))
 
     def predict_relations(self, sentence):
         pass
