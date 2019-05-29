@@ -112,3 +112,5 @@ data/codalab/*
 
 vscode/*
 .vscode/settings.json
+
+.idea
